@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Receipt Camera</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { background: #000; color: #fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { position: fixed; inset: 0; display: flex; flex-direction: column; }
+    .stage { position: relative; flex: 1 1 auto; }
+    video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .top { position: absolute; left: 0; right: 0; top: 0; text-align: center; padding: 10px; font-size: 12px; opacity: .8; }
+    .btns { position: absolute; left: 0; right: 0; bottom: 18px; display: flex; justify-content: center; gap: 12px; align-items: center; }
+    button.capture { width: 64px; height: 64px; border-radius: 999px; border: 0; background: rgba(255,255,255,.92); color: #000; font-size: 20px; box-shadow: 0 4px 20px rgba(0,0,0,.35); }
+    button:disabled { opacity: .6; }
+    .chip { cursor: pointer; font-size: 12px; padding: 8px 10px; border-radius: 999px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18); }
+    .loading, .gesture { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.6); }
+    .loading.show, .gesture.show { display: flex; }
+    .toast { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); background: rgba(255,255,255,.12); padding: 8px 10px; border-radius: 8px; font-size: 12px; }
+    .panel { flex: 0 0 auto; max-height: 36%; overflow: auto; border-top: 1px solid rgba(255,255,255,.12); padding: 12px; background: #0a0a0a; }
+    .item { background: rgba(255,255,255,.06); border-radius: 8px; padding: 8px; font-size: 12px; margin-bottom: 8px; }
+    .badge { font-size: 10px; padding: 2px 6px; border-radius: 999px; background: rgba(16,185,129,.25); }
+    .badge.bad { background: rgba(244,63,94,.25); }
+    details { margin-top: 10px; }
+    pre { background: rgba(255,255,255,.06); padding: 8px; border-radius: 8px; overflow: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="canvas" hidden></canvas>
+
+      <div class="top" id="status">Starting camera…</div>
+
+      <div class="gesture" id="gesture">
+        <button id="gestureBtn" class="capture" style="width:auto;height:auto;padding:10px 14px;font-size:14px;">Tap to start camera</button>
+      </div>
+
+      <div class="loading" id="loading"><div>Processing…</div></div>
+      <div class="toast" id="toast" hidden></div>
+
+      <div class="btns">
+        <button id="shot" class="capture" aria-label="Take photo">●</button>
+        <label for="uploader" id="uploadChip" class="chip">Upload</label>
+        <input id="uploader" type="file" accept="image/*" hidden />
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3 style="margin:0 0 8px;font-size:14px;">Products</h3>
+      <div id="empty" style="opacity:.7;font-size:12px;">No items yet. Take or upload a receipt to begin.</div>
+      <div id="list"></div>
+
+      <details>
+        <summary>Debug</summary>
+        <pre id="debug"></pre>
+      </details>
+    </div>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const shot = document.getElementById('shot');
+    const statusEl = document.getElementById('status');
+    const loading = document.getElementById('loading');
+    const toast = document.getElementById('toast');
+    const list = document.getElementById('list');
+    const empty = document.getElementById('empty');
+    const gesture = document.getElementById('gesture');
+    const gestureBtn = document.getElementById('gestureBtn');
+    const uploader = document.getElementById('uploader');
+    const debugEl = document.getElementById('debug');
+
+    let streamStarted = false;
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.hidden = false;
+      clearTimeout(showToast.t);
+      showToast.t = setTimeout(()=> toast.hidden = true, 3500);
+    }
+
+    function safeParseJSON(maybe) {
+      // try to parse 2 times in case of double-encoded JSON
+      try {
+        const once = typeof maybe === 'string' ? JSON.parse(maybe) : maybe;
+        if (typeof once === 'string') {
+          try { return JSON.parse(once); } catch { return once; }
+        }
+        return once;
+      } catch { return maybe; }
+    }
+
+    function extractItems(raw) {
+      // Lambda proxy often returns { statusCode, body: "stringified" }
+      const normalized = (() => {
+        if (raw && typeof raw.body !== 'undefined') {
+          return safeParseJSON(raw.body);
+        }
+        return raw;
+      })();
+
+      // Some backends put payload under body.body
+      const maybeDeeper = normalized && typeof normalized.body !== 'undefined'
+        ? safeParseJSON(normalized.body) : normalized;
+
+      // Accept any of these shapes
+      const candidates = [
+        maybeDeeper?.receipt?.items,
+        maybeDeeper?.items,
+        Array.isArray(maybeDeeper) ? maybeDeeper : null,
+        raw?.receipt?.items // last resort if caller already parsed differently
+      ];
+
+      for (const c of candidates) {
+        if (Array.isArray(c)) return c;
+      }
+      return [];
+    }
+
+    function setDebug(rawOut) {
+      try {
+        debugEl.textContent =
+`RAW:
+${JSON.stringify(rawOut, null, 2)}
+
+PARSED:
+${JSON.stringify(safeParseJSON(rawOut?.body ?? rawOut), null, 2)}`;
+      } catch {
+        debugEl.textContent = String(rawOut);
+      }
+    }
+
+    async function startCamera() {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia not supported');
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+        video.srcObject = stream;
+        try {
+          await video.play();
+          streamStarted = true; statusEl.textContent = 'Camera ready';
+        } catch {
+          gesture.classList.add('show');
+          statusEl.textContent = 'Tap to start camera';
+        }
+      } catch (e) {
+        const msg = e?.name === 'NotAllowedError' ? 'Permission denied. Enable camera in site settings.' :
+                    e?.name === 'NotFoundError' ? 'No camera found on this device.' :
+                    (location.protocol !== 'https:' && location.hostname !== 'localhost') ? 'Camera requires HTTPS or localhost.' :
+                    e?.message || 'Camera access failed.';
+        showToast(msg);
+        statusEl.textContent = 'Camera error';
+      }
+    }
+
+    gestureBtn.addEventListener('click', async () => {
+      try { await video.play(); streamStarted = true; gesture.classList.remove('show'); statusEl.textContent = 'Camera ready'; }
+      catch { showToast('Playback blocked. On iOS Safari, allow Camera in Settings > Safari'); }
+    });
+
+    async function sendBase64(base64) {
+      const res = await fetch('https://ptouo7dcbqhnpmc6uurxv6q5ii0ltzjz.lambda-url.us-east-2.on.aws/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ receiptImage: base64 })
+      });
+      if (!res.ok) throw new Error('Request failed: ' + res.status);
+      const out = await res.json();
+
+      // Debug panel
+      setDebug(out);
+
+      const items = extractItems(out);
+      renderItems(items);
+    }
+
+    async function takeAndSend() {
+      if (!streamStarted) { showToast('Camera not ready'); return; }
+      loading.classList.add('show');
+      try {
+        const w = video.videoWidth || 1080; const h = video.videoHeight || 1440;
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        const base64 = dataUrl.split(',')[1];
+        await sendBase64(base64);
+      } catch (e) {
+        if (String(e).includes('Failed to fetch')) showToast('Network/CORS error. Ensure Lambda sets Access-Control-Allow-Origin: *');
+        else showToast(e.message || 'Unexpected error');
+      } finally { loading.classList.remove('show'); }
+    }
+
+    uploader.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      loading.classList.add('show');
+      try {
+        const img = new Image();
+        img.onload = async () => {
+          try {
+            const max = 2000; // limit huge payloads
+            let w = img.naturalWidth, h = img.naturalHeight;
+            if (w > max || h > max) { const r = Math.min(max / w, max / h); w = Math.round(w * r); h = Math.round(h * r); }
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+            const base64 = dataUrl.split(',')[1];
+            await sendBase64(base64);
+          } catch(err) { showToast(err.message || 'Upload send failed'); }
+          finally { loading.classList.remove('show'); uploader.value = ''; }
+        };
+        img.onerror = () => { loading.classList.remove('show'); showToast('Invalid image file'); uploader.value=''; };
+        img.src = URL.createObjectURL(file);
+      } catch (err) { loading.classList.remove('show'); showToast(err.message || 'Upload failed'); }
+    });
+
+    function renderItems(items) {
+      list.innerHTML = '';
+      if (!items.length) { empty.style.display = 'block'; return; }
+      empty.style.display = 'none';
+      items.forEach(it => {
+        const row = document.createElement('div');
+        row.className = 'item';
+        row.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <strong>#${it?.id ?? ''}</strong>
+            <span class="badge ${it?.equivalent ? '' : 'bad'}">${it?.equivalent ? 'Equivalent' : 'Not equivalent'}</span>
+          </div>
+          ${it?.reason ? `<div style="opacity:.8;margin-top:4px;">${it.reason}</div>` : ''}
+          ${typeof it?.equivalent_product_id !== 'undefined' ? `<div style="opacity:.6;margin-top:4px;">Equivalent Product ID: ${it.equivalent_product_id}</div>` : ''}
+        `;
+        list.appendChild(row);
+      });
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      const s = video.srcObject;
+      if (document.hidden) {
+        if (s && s.getTracks) s.getTracks().forEach(t => t.stop());
+      } else {
+        if (!streamStarted) startCamera();
+      }
+    });
+
+    window.addEventListener('beforeunload', () => {
+      const s = video.srcObject; if (s && s.getTracks) s.getTracks().forEach(t => t.stop());
+    });
+
+    shot.addEventListener('click', takeAndSend);
+    startCamera();
+  </script>
+</body>
+</html>

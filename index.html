@@ -2,72 +2,202 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Receipt Camera</title>
   <style>
     html, body { height: 100%; margin: 0; }
-    body { background: #000; color: #fff; font-family: system-ui, sans-serif; }
-    video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    body { background: #000; color: #fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
     .wrap { position: fixed; inset: 0; display: flex; flex-direction: column; }
-    .stage { flex: 1; position: relative; }
-    .panel { max-height: 36%; overflow: auto; border-top: 1px solid rgba(255,255,255,.12); padding: 12px; background: #0a0a0a; }
-    .btns { position: absolute; bottom: 20px; left: 0; right: 0; display: flex; justify-content: center; gap: 12px; }
-    .capture { width: 64px; height: 64px; border-radius: 50%; background: rgba(255,255,255,.9); border: none; color: #000; font-size: 20px; }
+    .stage { position: relative; flex: 1 1 auto; }
+    video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background:#111; }
+    .top { position: absolute; left: 0; right: 0; top: 0; text-align: center; padding: 10px; font-size: 12px; opacity: .8; }
+    .btns { position: absolute; left: 0; right: 0; bottom: 18px; display: flex; justify-content: center; gap: 12px; align-items: center; }
+    button.capture { width: 64px; height: 64px; border-radius: 999px; border: 0; background: rgba(255,255,255,.92); color: #000; font-size: 20px; box-shadow: 0 4px 20px rgba(0,0,0,.35); }
+    button:disabled { opacity: .6; }
     .chip { cursor: pointer; font-size: 12px; padding: 8px 10px; border-radius: 999px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18); }
-    .loading { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; }
-    .loading.show { display: flex; }
-    .toast { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(255, 77, 77, 0.9); padding: 14px 18px; border-radius: 8px; font-size: 14px; text-align: center; max-width: 80%; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+    .loading, .gesture { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.6); }
+    .loading.show, .gesture.show { display: flex; }
+    .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: rgba(255,255,255,.12); backdrop-filter: blur(6px); padding: 10px 12px; border-radius: 10px; font-size: 12px; border: 1px solid rgba(255,255,255,.18); max-width: 92vw; }
     .toast[hidden] { display: none; }
+    .panel { flex: 0 0 auto; max-height: 36%; overflow: auto; border-top: 1px solid rgba(255,255,255,.12); padding: 12px; background: #0a0a0a; }
+    .item { background: rgba(255,255,255,.06); border-radius: 8px; padding: 8px; font-size: 12px; margin-bottom: 8px; }
+    .badge { font-size: 10px; padding: 2px 6px; border-radius: 999px; background: rgba(16,185,129,.25); }
+    .badge.bad { background: rgba(244,63,94,.25); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="stage">
-      <video id="video" autoplay playsinline muted></video>
+      <video id="video" playsinline muted autoplay></video>
       <canvas id="canvas" hidden></canvas>
-      <div class="loading" id="loading"><div>Processing...</div></div>
+
+      <div class="top" id="status">Starting camera…</div>
+
+      <div class="gesture" id="gesture">
+        <button id="gestureBtn" class="capture" style="width:auto;height:auto;padding:10px 14px;font-size:14px;">Tap to start camera</button>
+      </div>
+
+      <div class="loading" id="loading"><div>Processing…</div></div>
       <div class="btns">
-        <button id="capture" class="capture">●</button>
-        <label for="upload" class="chip">Upload</label>
-        <input id="upload" type="file" accept="image/*" hidden />
+        <button id="shot" class="capture" aria-label="Take photo">●</button>
+        <label for="uploader" id="uploadChip" class="chip">Upload</label>
+        <input id="uploader" type="file" accept="image/*" hidden />
       </div>
     </div>
+
     <div class="panel">
       <h3 style="margin:0 0 8px;font-size:14px;">Products</h3>
       <div id="empty" style="opacity:.7;font-size:12px;">No items yet. Take or upload a receipt to begin.</div>
       <div id="list"></div>
     </div>
   </div>
+
   <div class="toast" id="toast" hidden></div>
+
   <script>
     const API_URL = 'https://ptouo7dcbqhnpmc6uurxv6q5ii0ltzjz.lambda-url.us-east-2.on.aws/';
+
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
+    const shot = document.getElementById('shot');
+    const statusEl = document.getElementById('status');
     const loading = document.getElementById('loading');
-    const captureBtn = document.getElementById('capture');
-    const uploadInput = document.getElementById('upload');
     const list = document.getElementById('list');
     const empty = document.getElementById('empty');
+    const gesture = document.getElementById('gesture');
+    const gestureBtn = document.getElementById('gestureBtn');
+    const uploader = document.getElementById('uploader');
     const toast = document.getElementById('toast');
 
     let streamStarted = false;
 
-    function showToast(message, duration = 4000) {
-      toast.textContent = message;
+    function showToast(msg) {
+      toast.textContent = msg;
       toast.hidden = false;
-      clearTimeout(showToast.timeout);
-      showToast.timeout = setTimeout(() => toast.hidden = true, duration);
+      clearTimeout(showToast.t);
+      showToast.t = setTimeout(()=> toast.hidden = true, 4000);
+    }
+
+    function safeParseJSON(maybe) {
+      try {
+        const once = typeof maybe === 'string' ? JSON.parse(maybe) : maybe;
+        if (typeof once === 'string') {
+          try { return JSON.parse(once); } catch { return once; }
+        }
+        return once;
+      } catch { return maybe; }
+    }
+
+    function extractItems(bodyOrArray) {
+      const body = bodyOrArray;
+      const candidates = [
+        body?.receipt?.items,
+        body?.items,
+        Array.isArray(body) ? body : null
+      ];
+      for (const c of candidates) if (Array.isArray(c)) return c;
+      return [];
     }
 
     async function startCamera() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia not supported');
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
         video.srcObject = stream;
-        await video.play();
-        streamStarted = true;
+        try {
+          await video.play();
+          streamStarted = true; statusEl.textContent = 'Camera ready';
+        } catch {
+          gesture.classList.add('show');
+          statusEl.textContent = 'Tap to start camera';
+        }
       } catch (e) {
-        showToast('Camera access failed. Please allow camera permissions.');
+        const msg = e?.name === 'NotAllowedError' ? 'Permission denied. Enable camera in site settings.' :
+                    e?.name === 'NotFoundError' ? 'No camera found on this device.' :
+                    (location.protocol !== 'https:' && location.hostname !== 'localhost') ? 'Camera requires HTTPS or localhost.' :
+                    e?.message || 'Camera access failed.';
+        showToast(msg);
+        statusEl.textContent = 'Camera error';
       }
+    }
+
+    gestureBtn.addEventListener('click', async () => {
+      try { await video.play(); streamStarted = true; gesture.classList.remove('show'); statusEl.textContent = 'Camera ready'; }
+      catch { showToast('Playback blocked. On iOS Safari, allow Camera in Settings > Safari'); }
+    });
+
+    async function postImageBase64(base64) {
+      const res = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ receiptImage: base64 })
+      });
+
+      // If backend returns 422 with JSON body, read and show the toast
+      if (res.status === 422) {
+        // Try to parse JSON whether or not content-type is set correctly
+        let errPayload = null;
+        try { errPayload = await res.json(); } catch { errPayload = null; }
+
+        // Accept both direct JSON and Lambda proxy with string body
+        const body = safeParseJSON(errPayload?.body ?? errPayload);
+        const msg = body?.message || 'No receipt items were detected.';
+        const reason = body?.details?.reason ? ` (${body.details.reason})` : '';
+        showToast(`${msg}${reason}`);
+        return { items: [] };
+      }
+
+      if (!res.ok) throw new Error('Request failed: ' + res.status);
+
+      const out = await res.json();
+      const body = safeParseJSON(out?.body ?? out);
+      return { items: extractItems(body) };
+    }
+
+    async function captureAndSendFromVideo() {
+      if (!streamStarted) { showToast('Camera not ready'); return; }
+      loading.classList.add('show');
+      try {
+        const w = video.videoWidth || 1080; const h = video.videoHeight || 1440;
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        const base64 = dataUrl.split(',')[1];
+        const { items } = await postImageBase64(base64);
+        renderItems(items);
+      } catch (e) {
+        if (String(e).includes('Failed to fetch')) showToast('Network/CORS error. Ensure Access-Control-Allow-Origin is set');
+        else showToast(e.message || 'Unexpected error');
+      } finally { loading.classList.remove('show'); }
+    }
+
+    async function sendUploadedFile(file) {
+      loading.classList.add('show');
+      try {
+        const img = new Image();
+        img.onload = async () => {
+          try {
+            const max = 2000;
+            let w = img.naturalWidth, h = img.naturalHeight;
+            if (w > max || h > max) { const r = Math.min(max / w, max / h); w = Math.round(w * r); h = Math.round(h * r); }
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+            const base64 = dataUrl.split(',')[1];
+            const { items } = await postImageBase64(base64);
+            renderItems(items);
+          } catch (err) {
+            showToast(err.message || 'Upload send failed');
+          } finally {
+            loading.classList.remove('show');
+            uploader.value = '';
+          }
+        };
+        img.onerror = () => { loading.classList.remove('show'); showToast('Invalid image file'); uploader.value=''; };
+        img.src = URL.createObjectURL(file);
+      } catch (err) { loading.classList.remove('show'); showToast(err.message || 'Upload failed'); }
     }
 
     function renderItems(items) {
@@ -77,71 +207,37 @@
       items.forEach(it => {
         const row = document.createElement('div');
         row.className = 'item';
-        row.style = 'background:rgba(255,255,255,.06);border-radius:8px;padding:8px;font-size:12px;margin-bottom:8px;';
         row.innerHTML = `
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
             <strong>#${it?.id ?? ''}</strong>
-            <span style="font-size:10px;padding:2px 6px;border-radius:999px;background:${it?.equivalent?'rgba(16,185,129,.25)':'rgba(244,63,94,.25)'}">${it?.equivalent?'Equivalent':'Not equivalent'}</span>
+            <span class="badge ${it?.equivalent ? '' : 'bad'}">${it?.equivalent ? 'Equivalent' : 'Not equivalent'}</span>
           </div>
-          ${it?.reason?`<div style='opacity:.8;margin-top:4px;'>${it.reason}</div>`:''}
-          ${typeof it?.equivalent_product_id!=='undefined'?`<div style='opacity:.6;margin-top:4px;'>Equivalent Product ID: ${it.equivalent_product_id}</div>`:''}
+          ${it?.reason ? `<div style="opacity:.8;margin-top:4px;">${it.reason}</div>` : ''}
+          ${typeof it?.equivalent_product_id !== 'undefined' ? `<div style="opacity:.6;margin-top:4px;">Equivalent Product ID: ${it.equivalent_product_id}</div>` : ''}
         `;
         list.appendChild(row);
       });
     }
 
-    async function sendToAPI(base64) {
-      const res = await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receiptImage: base64 })
-      });
-      const out = await res.json().catch(()=>({}));
-      if (res.status === 422) {
-        const body = typeof out.body === 'string' ? JSON.parse(out.body) : out.body;
-        const msg = body?.message || 'No receipt items detected. Please use a clearer image.';
-        showToast(msg);
-        return [];
+    document.addEventListener('visibilitychange', () => {
+      const s = video.srcObject;
+      if (document.hidden) {
+        if (s && s.getTracks) s.getTracks().forEach(t => t.stop());
+      } else {
+        if (!streamStarted) startCamera();
       }
-      const body = typeof out.body === 'string' ? JSON.parse(out.body) : out.body;
-      const items = body?.receipt?.items || body?.items || [];
-      return items;
-    }
-
-    async function captureAndSend() {
-      if (!streamStarted) { showToast('Camera not ready'); return; }
-      loading.classList.add('show');
-      try {
-        const w = video.videoWidth, h = video.videoHeight;
-        canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0, w, h);
-        const base64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
-        const items = await sendToAPI(base64);
-        renderItems(items);
-      } catch (e) {
-        showToast(e.message || 'Unexpected error');
-      } finally { loading.classList.remove('show'); }
-    }
-
-    uploadInput.addEventListener('change', e => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = async () => {
-        loading.classList.add('show');
-        try {
-          const base64 = reader.result.split(',')[1];
-          const items = await sendToAPI(base64);
-          renderItems(items);
-        } catch (e) {
-          showToast(e.message || 'Upload failed');
-        } finally { loading.classList.remove('show'); uploadInput.value = ''; }
-      };
-      reader.readAsDataURL(file);
     });
 
-    captureBtn.addEventListener('click', captureAndSend);
+    window.addEventListener('beforeunload', () => {
+      const s = video.srcObject; if (s && s.getTracks) s.getTracks().forEach(t => t.stop());
+    });
+
+    shot.addEventListener('click', captureAndSendFromVideo);
+    uploader.addEventListener('change', e => {
+      const file = e.target.files && e.target.files[0];
+      if (file) sendUploadedFile(file);
+    });
+
     startCamera();
   </script>
 </body>

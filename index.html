@@ -18,6 +18,7 @@
     .loading, .gesture { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.6); }
     .loading.show, .gesture.show { display: flex; }
     .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: rgba(255,255,255,.12); backdrop-filter: blur(6px); padding: 10px 12px; border-radius: 10px; font-size: 12px; border: 1px solid rgba(255,255,255,.18); max-width: 92vw; }
+    .toast.center { top: 50%; bottom: auto; transform: translate(-50%, -50%); }
     .toast[hidden] { display: none; }
     .panel { flex: 0 0 auto; max-height: 36%; overflow: auto; border-top: 1px solid rgba(255,255,255,.12); padding: 12px; background: #0a0a0a; }
     .item { background: rgba(255,255,255,.06); border-radius: 8px; padding: 8px; font-size: 12px; margin-bottom: 8px; }
@@ -71,9 +72,11 @@
 
     let streamStarted = false;
 
-    function showToast(msg) {
+    function showToast(msg, center = false) {
       toast.textContent = msg;
       toast.hidden = false;
+      if (center) toast.classList.add('center');
+      else toast.classList.remove('center');
       clearTimeout(showToast.t);
       showToast.t = setTimeout(()=> toast.hidden = true, 4000);
     }
@@ -141,9 +144,10 @@
 
         // Accept both direct JSON and Lambda proxy with string body
         const body = safeParseJSON(errPayload?.body ?? errPayload);
-        const msg = body?.message || 'No receipt items were detected.';
-        const reason = body?.details?.reason ? ` (${body.details.reason})` : '';
-        showToast(`${msg}${reason}`);
+        const defaultMsg = "We couldn't find any receipt items in this image. Please try again with a clearer photo.";
+        const msg = body?.message || defaultMsg;
+        const reason = body?.details?.reason ? ` — ${body.details.reason}` : '';
+        showToast(`${msg}${reason}`, true);
         return { items: [] };
       }
 
